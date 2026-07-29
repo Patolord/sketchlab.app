@@ -1248,7 +1248,7 @@ button {
   position: relative;
   transition: border-color 0.12s, background 0.12s, box-shadow 0.12s, opacity 0.12s;
 }
-.layers-panel__item.is-draggable {
+.layers-panel__item[draggable="true"] {
   cursor: grab;
 }
 .layers-panel__item.is-dragging {

@@ -75,11 +75,6 @@ function dropTargetFloorIndex(
   return floorCount - 1 - insertPosition;
 }
 
-function dropPlacement(item: HTMLElement, event: DragEvent): DropPlacement {
-  const bounds = item.getBoundingClientRect();
-  return event.clientY < bounds.top + bounds.height / 2 ? "before" : "after";
-}
-
 /**
  * Always-visible, right-docked panel listing every floor of the board (top→bottom).
  * Each row carries a show/hide eye toggle; clicking the body highlights that floor
@@ -308,33 +303,22 @@ export class LayersPanel {
     }
   }
 
-  /** Resolve row and insertion side even when the pointer is in the gap between rows. */
-  private dropTarget(event: DragEvent): DropTarget | null {
+  /** Resolve the insertion row even when the pointer is in the gap between rows. */
+  private resolveDropTarget(event: DragEvent): DropTarget | null {
     const items = [...this.list.querySelectorAll<HTMLElement>(".layers-panel__item")];
     if (!items.length) return null;
 
-    const eventTarget = event.target instanceof Element
-      ? event.target.closest<HTMLElement>(".layers-panel__item")
-      : null;
-    let item = eventTarget && this.list.contains(eventTarget) ? eventTarget : null;
-    let placement: DropPlacement;
-
-    if (item) {
-      placement = dropPlacement(item, event);
-    } else {
-      item = items.find((candidate) => event.clientY < candidate.getBoundingClientRect().top)
-        ?? items[items.length - 1];
-      placement = item === items[items.length - 1] && event.clientY >= item.getBoundingClientRect().top
-        ? "after"
-        : "before";
-    }
-
+    const item = items.find((candidate) => event.clientY <= candidate.getBoundingClientRect().bottom)
+      ?? items[items.length - 1];
+    const bounds = item.getBoundingClientRect();
+    const placement: DropPlacement =
+      event.clientY < bounds.top + bounds.height / 2 ? "before" : "after";
     const index = Number(item.dataset.layerIndex);
     return Number.isInteger(index) ? { item, index, placement } : null;
   }
 
   private dragOver(event: DragEvent): void {
-    const target = this.dropTarget(event);
+    const target = this.resolveDropTarget(event);
     if (this.dragFrom == null || !target || this.dragFrom === target.index) {
       this.dragTarget = null;
       this.clearDropIndicators();
@@ -361,7 +345,7 @@ export class LayersPanel {
     this.dragTarget = null;
     this.list.querySelector(".layers-panel__item.is-dragging")?.classList.remove("is-dragging");
     this.clearDropIndicators();
-    if (from == null || !target || from === target.index) return;
+    if (from == null || !target) return;
     const to = dropTargetFloorIndex(
       total,
       from,
@@ -497,12 +481,10 @@ export class LayersPanel {
       "🗑",
     );
 
-    const item = h(
+    return h(
       "div",
       {
-        class:
-          (row.hidden ? "layers-panel__item is-hidden" : "layers-panel__item") +
-          (total > 1 ? " is-draggable" : ""),
+        class: row.hidden ? "layers-panel__item is-hidden" : "layers-panel__item",
         role: "button",
         tabindex: "0",
         draggable: total > 1,
@@ -521,10 +503,6 @@ export class LayersPanel {
           }
         },
         ondragstart: (e: DragEvent) => {
-          if (total < 2) {
-            e.preventDefault();
-            return;
-          }
           const target = e.target as HTMLElement | null;
           if (target?.closest("button, input, .layers-panel__color, .swatch")) {
             e.preventDefault();
@@ -532,7 +510,7 @@ export class LayersPanel {
           }
           this.dragFrom = i;
           this.dragTarget = null;
-          item.classList.add("is-dragging");
+          (e.currentTarget as HTMLElement).classList.add("is-dragging");
           e.dataTransfer?.setData("text/plain", String(i));
           if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
         },
@@ -559,6 +537,5 @@ export class LayersPanel {
         h("div", { class: "layers-panel__actions" }, assignBtn, renameBtn, delBtn),
       ),
     );
-    return item;
   }
 }
