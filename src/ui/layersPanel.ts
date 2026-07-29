@@ -53,6 +53,33 @@ interface FloorRow {
   color?: string;
 }
 
+type DropPlacement = "before" | "after";
+
+interface DropTarget {
+  item: HTMLElement;
+  index: number;
+  placement: DropPlacement;
+}
+
+/** Convert a high→low panel drop position into a bottom→top floor index. */
+function dropTargetFloorIndex(
+  floorCount: number,
+  fromIndex: number,
+  overIndex: number,
+  placement: DropPlacement,
+): number {
+  const fromPosition = floorCount - 1 - fromIndex;
+  const overPosition = floorCount - 1 - overIndex;
+  let insertPosition = placement === "before" ? overPosition : overPosition + 1;
+  if (fromPosition < insertPosition) insertPosition--;
+  return floorCount - 1 - insertPosition;
+}
+
+function dropPlacement(item: HTMLElement, event: DragEvent): DropPlacement {
+  const bounds = item.getBoundingClientRect();
+  return event.clientY < bounds.top + bounds.height / 2 ? "before" : "after";
+}
+
 /**
  * Always-visible, right-docked panel listing every floor of the board (top→bottom).
  * Each row carries a show/hide eye toggle; clicking the body highlights that floor
@@ -71,6 +98,10 @@ export class LayersPanel {
   /** a refresh requested while collapsed is deferred until the panel is shown again */
   private dirty = false;
   private unsubs: Array<() => void> = [];
+  /** floor index being dragged, or null when idle */
+  private dragFrom: number | null = null;
+  /** last valid insertion point; used when the browser ends a drag without firing drop */
+  private dragTarget: DropTarget | null = null;
 
   constructor(
     editor: HTMLElement,
@@ -104,7 +135,10 @@ export class LayersPanel {
       },
     );
 
-    this.list = h("div", { class: "layers-panel__list" });
+    this.list = h("div", {
+      class: "layers-panel__list",
+      ondragover: (e: DragEvent) => this.dragOver(e),
+    });
 
     // Floor-spread dial: scales the world-up gap between stacked floors so a
     // layered board is easier to read. Mirrors (and is mirrored by) the
@@ -266,6 +300,77 @@ export class LayersPanel {
     $activeLayer.set(i);
   }
 
+  private clearDropIndicators(): void {
+    for (const el of this.list.querySelectorAll(
+      ".layers-panel__item.is-drop-before, .layers-panel__item.is-drop-after",
+    )) {
+      el.classList.remove("is-drop-before", "is-drop-after");
+    }
+  }
+
+  /** Resolve row and insertion side even when the pointer is in the gap between rows. */
+  private dropTarget(event: DragEvent): DropTarget | null {
+    const items = [...this.list.querySelectorAll<HTMLElement>(".layers-panel__item")];
+    if (!items.length) return null;
+
+    const eventTarget = event.target instanceof Element
+      ? event.target.closest<HTMLElement>(".layers-panel__item")
+      : null;
+    let item = eventTarget && this.list.contains(eventTarget) ? eventTarget : null;
+    let placement: DropPlacement;
+
+    if (item) {
+      placement = dropPlacement(item, event);
+    } else {
+      item = items.find((candidate) => event.clientY < candidate.getBoundingClientRect().top)
+        ?? items[items.length - 1];
+      placement = item === items[items.length - 1] && event.clientY >= item.getBoundingClientRect().top
+        ? "after"
+        : "before";
+    }
+
+    const index = Number(item.dataset.layerIndex);
+    return Number.isInteger(index) ? { item, index, placement } : null;
+  }
+
+  private dragOver(event: DragEvent): void {
+    const target = this.dropTarget(event);
+    if (this.dragFrom == null || !target || this.dragFrom === target.index) {
+      this.dragTarget = null;
+      this.clearDropIndicators();
+      return;
+    }
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    this.dragTarget = target;
+    this.clearDropIndicators();
+    target.item.classList.add(
+      target.placement === "before" ? "is-drop-before" : "is-drop-after",
+    );
+  }
+
+  private finishDrag(event: DragEvent): void {
+    const from = this.dragFrom;
+    let target = this.dragTarget;
+    const total = this.list.children.length;
+    if (event.clientX || event.clientY) {
+      const endTarget = document.elementFromPoint(event.clientX, event.clientY);
+      if (!endTarget || !this.list.contains(endTarget)) target = null;
+    }
+    this.dragFrom = null;
+    this.dragTarget = null;
+    this.list.querySelector(".layers-panel__item.is-dragging")?.classList.remove("is-dragging");
+    this.clearDropIndicators();
+    if (from == null || !target || from === target.index) return;
+    const to = dropTargetFloorIndex(
+      total,
+      from,
+      target.index,
+      target.placement,
+    );
+    if (to !== from) actions.reorderLayer(from, to);
+  }
+
   private row(
     row: FloorRow,
     active: number,
@@ -392,13 +497,18 @@ export class LayersPanel {
       "🗑",
     );
 
-    return h(
+    const item = h(
       "div",
       {
-        class: row.hidden ? "layers-panel__item is-hidden" : "layers-panel__item",
+        class:
+          (row.hidden ? "layers-panel__item is-hidden" : "layers-panel__item") +
+          (total > 1 ? " is-draggable" : ""),
         role: "button",
         tabindex: "0",
+        draggable: total > 1,
+        "data-layer-index": String(i),
         "aria-current": i === active ? "true" : undefined,
+        title: total > 1 ? "Drag to reorder floors" : undefined,
         onclick: () => this.activate(i, row.hidden),
         ondblclick: () => {
           const name = prompt("Rename layer", row.name);
@@ -410,6 +520,23 @@ export class LayersPanel {
             this.activate(i, row.hidden);
           }
         },
+        ondragstart: (e: DragEvent) => {
+          if (total < 2) {
+            e.preventDefault();
+            return;
+          }
+          const target = e.target as HTMLElement | null;
+          if (target?.closest("button, input, .layers-panel__color, .swatch")) {
+            e.preventDefault();
+            return;
+          }
+          this.dragFrom = i;
+          this.dragTarget = null;
+          item.classList.add("is-dragging");
+          e.dataTransfer?.setData("text/plain", String(i));
+          if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+        },
+        ondragend: (e: DragEvent) => this.finishDrag(e),
       },
       // Top line: visibility controls + the (now full-width) floor name.
       h(
@@ -432,5 +559,6 @@ export class LayersPanel {
         h("div", { class: "layers-panel__actions" }, assignBtn, renameBtn, delBtn),
       ),
     );
+    return item;
   }
 }
